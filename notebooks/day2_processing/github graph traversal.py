@@ -552,25 +552,24 @@ def purge_blocked_from_cache(blocked_set):
     """
     if not blocked_set:
         return 0
+    if not spark.catalog.tableExists(ai_query_cache_table):
+        print(f"  - {ai_query_cache_table} doesn't exist yet, nothing to purge")
+        return 0
     blocked_rows_df = spark.createDataFrame(
         [(s, p, t) for (s, p, t) in blocked_set],
         schema=["source_repo", "package_name", "suggested_repo"],
     )
     blocked_rows_df.createOrReplaceTempView("blocked_ai_suggestions")
-    try:
-        spark.sql(f"""
-            MERGE INTO {ai_query_cache_table} AS c
-            USING blocked_ai_suggestions AS b
-              ON  c.source_repo    = b.source_repo
-              AND c.package_name   = b.package_name
-              AND c.suggested_repo = b.suggested_repo
-            WHEN MATCHED THEN DELETE
-        """)
-        print(f"  ✓ Purged blocked mappings from {ai_query_cache_table}")
-        return len(blocked_set)
-    except Exception as e:
-        print(f"  ⚠ Could not purge cache ({e})")
-        return 0
+    spark.sql(f"""
+        MERGE INTO {ai_query_cache_table} AS c
+        USING blocked_ai_suggestions AS b
+          ON  c.source_repo    = b.source_repo
+          AND c.package_name   = b.package_name
+          AND c.suggested_repo = b.suggested_repo
+        WHEN MATCHED THEN DELETE
+    """)
+    print(f"  ✓ Purged blocked mappings from {ai_query_cache_table}")
+    return len(blocked_set)
 
 
 def discover_repos_from_dependencies_ai(staging_df, already_seen, client):
