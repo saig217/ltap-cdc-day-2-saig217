@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>GitHub Repo Explorer</title>
+  <style>
+    body { font-family: -apple-system, Arial, sans-serif; max-width: 720px; margin: 60px auto; color: #222; }
+    h1 { font-size: 20px; }
+    label { display: block; margin-top: 16px; font-weight: 600; }
+    input[type="text"] { width: 100%; padding: 8px; margin-top: 6px; box-sizing: border-box; }
+    button { margin-top: 16px; padding: 8px 16px; cursor: pointer; }
+    #result { margin-top: 20px; white-space: pre-wrap; background: #f6f6f6; padding: 12px; border-radius: 6px; min-height: 20px; }
+    .hint { color: #777; font-size: 13px; margin-top: 4px; }
+    table { width: 100%; margin-top: 24px; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
+    th { font-size: 13px; color: #555; text-transform: uppercase; }
+    .fav-btn { cursor: pointer; background: none; border: none; font-size: 18px; padding: 0 4px; }
+    .del-btn { cursor: pointer; background: none; border: none; font-size: 14px; color: #b00020; padding: 0 4px; }
+    .bad-btn { cursor: pointer; margin-top: 0; padding: 4px 8px; font-size: 12px; border: 1px solid #e57373; background: #fff5f5; color: #b00020; border-radius: 4px; }
+    .bad-btn:hover { background: #ffe9e9; }
+  </style>
+</head>
+<body>
+  <h1>GitHub Repo Explorer</h1>
+  <p class="hint">
+    Signed in as <strong>{{ username }}</strong> (Lakebase schema <code>{{ schema }}</code>) -
+    <form method="POST" action="/logout" style="display:inline;"><button type="submit" style="margin-top:0;">Sign out</button></form>
+  </p>
+
+  <div id="schema-warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; border-radius:6px; padding:12px; margin-bottom:20px;">
+    <strong>Tables not found for this username.</strong>
+    <span id="schema-warning-detail"></span>
+  </div>
+
+  <p class="hint">Enter an "owner/repo" name. This fetches stats from GitHub and adds it to your <code>github_repos</code> table.</p>
+
+  <form id="repo-form">
+    <label for="full_name">Repository (owner/repo)</label>
+    <input type="text" id="full_name" name="full_name" placeholder="databricks/spark" required>
+    <button type="submit">Add repo</button>
+  </form>
+
+  <div id="result"></div>
+
+  <table id="repos-table">
+    <thead>
+      <tr>
+        <th>Repo</th>
+        <th>Language</th>
+        <th>Stars</th>
+        <th>Open Issues</th>
+        <th>Forks</th>
+        <th>Fav</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="repos-body"></tbody>
+  </table>
+
+  <hr style="margin-top:40px;">
+  <h2 style="font-size:18px;">Repo Graph</h2>
+  <p class="hint">Relationships discovered via graph traversal. Read from <code>{{ graph_table }}</code>.</p>
+  <div id="repo-filter-indicator" style="display:none; margin-bottom:8px; font-size:13px; background:#e3f2fd; border-radius:4px; padding:6px 10px;">
+    Filtering graph by: <strong id="repo-filter-name"></strong>
+    <button onclick="clearRepoFilter()" style="margin-left:8px; cursor:pointer; background:none; border:none; color:#1565c0; font-size:13px;">✕ Clear</button>
+  </div>
+
+  <div style="margin-bottom:12px;">
+    <label for="edge-filter" style="display:inline; font-size:13px;">Filter by type:</label>
+    <select id="edge-filter" onchange="loadEdges()" style="padding:4px 8px;">
+      <option value="">All</option>
+      <option value="dependency">Dependency</option>
+      <option value="ai_suggested">AI Suggested</option>
+    </select>
+    <span id="edge-stats" style="margin-left:16px; font-size:13px; color:#555;"></span>
+  </div>
+
+  <table id="edges-table">
+    <thead>
+      <tr>
+        <th>Source</th>
+        <th>→</th>
+        <th>Target</th>
+        <th>Type</th>
+        <th>Details</th>
+        <th>Discovered</th>
+        <th>Feedback</th>
+      </tr>
+    </thead>
+    <tbody id="edges-body"></tbody>
+  </table>
+  <p id="edges-empty" class="hint" style="display:none;">No graph edges found. Run the graph traversal notebook if this table is empty.</p>
+  <div id="feedback-status" style="display:none; margin-top:12px; padding:10px; border-radius:6px; font-size:13px;"></div>
+
+  <hr style="margin-top:40px;">
+  <h2 style="font-size:18px;">Feedback History</h2>
+  <p class="hint">
+    Written to <code>{{ feedback_table }}</code> in Lakebase, then CDC'd back into Delta.
+    Rows marked <strong>bad</strong> are dropped from <code>ai_query_cache</code> on the next traversal run.
+    <button onclick="loadFeedback()" style="margin-top:0; margin-left:8px;">Refresh</button>
+  </p>
+  <table id="feedback-table">
+    <thead>
+      <tr>
+        <th>Source</th>
+        <th>Package</th>
+        <th>Suggested</th>
+        <th>Verdict</th>
+        <th>Reason</th>
+        <th>Submitted</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="feedback-body"></tbody>
+  </table>
+  <p id="feedback-empty" class="hint" style="display:none;">No feedback submitted yet.</p>
+
+  <script>
+    const form = document.getElementById("repo-form");
+    const resultEl = document.getElementById("result");
+    const reposBody = document.getElementById("repos-body");
+    const schemaWarning = document.getElementById("schema-warning");
+    const schemaWarningDetail = document.getElementById("schema-warning-detail");
+    let activeRepoFilter = null;
+
+    async function checkSchemaStatus() {
+      try {
+        const resp = await fetch("/schema/status");
+        const data = await resp.json();
+        if (!resp.ok) return;
+
+        const missing = [];
+        if (!data.github_repos_exists) missing.push(data.github_repos);
+        if (!data.github_files_exists) missing.push(data.github_files);
+
+        if (missing.length > 0) {
+          schemaWarningDetail.textContent = " Missing: " + missing.join(", ") + ".";
+          schemaWarning.style.display = "block";
+        }
+      } catch (err) {}
+    }
+
+    async function loadRepos() {
+      try {
+        const resp = await fetch("/repos");
+        const data = await resp.json();
+        if (!resp.ok) {
+          if (resp.status === 404) return; // table doesn't exist yet
+          resultEl.textContent = "Error loading repos: " + (data.error || resp.statusText);
+          return;
+        }
+        reposBody.innerHTML = "";
+        data.forEach((row) => {
+          const tr = document.createElement("tr");
+          tr.style.cursor = "pointer";
+          if (activeRepoFilter === row.full_name) tr.style.background = "#e3f2fd";
+          const favIcon = row.is_favorite ? "⭐" : "☆";
+          tr.innerHTML = `<td>${row.full_name}</td><td>${row.language || "-"}</td><td>${row.stargazers_count ?? "-"}</td><td>${row.open_issues_count ?? "-"}</td><td>${row.forks_count ?? "-"}</td><td><button class="fav-btn" onclick="event.stopPropagation(); toggleFav('${row.full_name}', ${!row.is_favorite})">${favIcon}</button></td><td><button class="del-btn" onclick="event.stopPropagation(); removeRepo('${row.full_name}')">✕</button></td>`;
+          tr.addEventListener("click", () => setRepoFilter(row.full_name));
+          reposBody.appendChild(tr);
+        });
+      } catch (err) {
+        resultEl.textContent = "Failed to load repos: " + err;
+      }
+    }
+
+    async function toggleFav(fullName, isFavorite) {
+      try {
+        const resp = await fetch("/repos/favorite", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ full_name: fullName, is_favorite: isFavorite }),
+        });
+        if (resp.ok) loadRepos();
+      } catch (err) {
+        resultEl.textContent = "Failed to toggle favorite: " + err;
+      }
+    }
+
+    async function removeRepo(fullName) {
+      if (!confirm("Remove " + fullName + "?")) return;
+      try {
+        const resp = await fetch("/repos", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ full_name: fullName }),
+        });
+        if (resp.ok) loadRepos();
+      } catch (err) {
+        resultEl.textContent = "Failed to remove repo: " + err;
+      }
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const full_name = document.getElementById("full_name").value;
+      resultEl.textContent = "Adding repo...";
+
+      try {
+        const resp = await fetch("/repos", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ full_name }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          resultEl.textContent = "Error: " + (data.error || resp.statusText);
+          return;
+        }
+        resultEl.textContent = "Added " + data.full_name + " (" + data.stargazers_count + " stars)";
+        document.getElementById("full_name").value = "";
+        loadRepos();
+      } catch (err) {
+        resultEl.textContent = "Request failed: " + err;
+      }
+    });
+
+    function setRepoFilter(repoName) {
+      activeRepoFilter = repoName;
+      document.getElementById("repo-filter-indicator").style.display = "block";
+      document.getElementById("repo-filter-name").textContent = repoName;
+      loadRepos();
+      loadEdges();
+    }
+
+    function clearRepoFilter() {
+      activeRepoFilter = null;
+      document.getElementById("repo-filter-indicator").style.display = "none";
+      loadRepos();
+      loadEdges();
+    }
+
+    async function loadEdgeStats() {
+      try {
+        const resp = await fetch("/graph/stats");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const statsEl = document.getElementById("edge-stats");
+        const parts = data.by_type.map(r => `${r.edge_type}: ${r.count}`);
+        statsEl.textContent = `Total: ${data.total_edges} edges (${parts.join(", ")})`;
+      } catch (err) {}
+    }
+
+    async function loadEdges() {
+      const filter = document.getElementById("edge-filter").value;
+      const params = filter ? `?edge_type=${filter}` : "";
+      const edgesBody = document.getElementById("edges-body");
+      const emptyMsg = document.getElementById("edges-empty");
+
+      try {
+        const resp = await fetch("/graph/edges" + params);
+        const data = await resp.json();
+        if (!resp.ok) {
+          if (resp.status === 404) {
+            edgesBody.innerHTML = "";
+            emptyMsg.style.display = "block";
+            return;
+          }
+          return;
+        }
+        let filtered = data;
+        if (activeRepoFilter) {
+          filtered = data.filter(edge => edge.source === activeRepoFilter || edge.target === activeRepoFilter);
+        }
+        emptyMsg.style.display = filtered.length === 0 ? "block" : "none";
+        edgesBody.innerHTML = "";
+        filtered.forEach((edge) => {
+          const tr = document.createElement("tr");
+          let details = "";
+          if (edge.metadata) {
+            try {
+              const meta = JSON.parse(edge.metadata);
+              if (meta.source_repo) details = `from ${meta.source_repo}`;
+              else if (meta.validated) details = "✓ validated";
+              else details = Object.entries(meta).map(([k,v]) => `${k}: ${v}`).join(", ");
+            } catch(e) { details = edge.metadata; }
+          }
+          const discovered = edge.discovered_at ? new Date(edge.discovered_at).toLocaleDateString() : "-";
+
+          // package_name only exists on ai_suggested edges produced by the patched
+          // notebook. Older edges predate the metadata change, so we prompt for it
+          // rather than writing a placeholder that would never match the cache key.
+          let pkg = "";
+          if (edge.metadata) {
+            try { pkg = JSON.parse(edge.metadata).package_name || ""; } catch (e) {}
+          }
+          let actionCell = '<td class="hint">-</td>';
+          if (edge.edge_type === "ai_suggested") {
+            const args = [edge.source, pkg, edge.target].map(v => JSON.stringify(v || "")).join(", ");
+            actionCell = `<td><button class="bad-btn" onclick='markBad(${args})'>Mark as Bad</button></td>`;
+          }
+
+          tr.innerHTML = `<td><code>${edge.source}</code></td><td style="text-align:center;">&rarr;</td><td><code>${edge.target}</code></td><td>${edge.edge_type}</td><td class="hint">${details}</td><td class="hint">${discovered}</td>` + actionCell;
+          edgesBody.appendChild(tr);
+        });
+      } catch (err) {
+        emptyMsg.style.display = "block";
+      }
+    }
+
+    function showFeedbackStatus(message, ok) {
+      const el = document.getElementById("feedback-status");
+      el.textContent = message;
+      el.style.display = "block";
+      el.style.background = ok ? "#e8f5e9" : "#fdecea";
+      el.style.border = "1px solid " + (ok ? "#66bb6a" : "#e57373");
+      el.style.color = ok ? "#1b5e20" : "#b00020";
+    }
+
+    async function markBad(sourceRepo, packageName, suggestedRepo) {
+      // The cache is keyed on (source_repo, package_name, suggested_repo). Without a
+      // real package name the pipeline's blocked-set lookup matches nothing, so the
+      // feedback would look successful and do nothing. Refuse to guess.
+      let pkg = packageName;
+      if (!pkg) {
+        pkg = prompt(
+          "This edge has no package_name in its metadata (it predates the notebook patch).\n" +
+          "Enter the dependency/package name that produced " + suggestedRepo + ":"
+        );
+        if (!pkg) {
+          showFeedbackStatus("Cancelled: package_name is required for the pipeline to block this suggestion.", false);
+          return;
+        }
+      }
+
+      const reason = prompt("Why is " + suggestedRepo + " a bad suggestion? (optional)") || "";
+
+      try {
+        const resp = await fetch("/graph/edges/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source_repo: sourceRepo,
+            package_name: pkg.trim(),
+            suggested_repo: suggestedRepo,
+            feedback: "bad",
+            reason: reason.trim() || null,
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          showFeedbackStatus("Error " + resp.status + ": " + (data.error || resp.statusText), false);
+          return;
+        }
+        showFeedbackStatus(
+          "Marked " + data.suggested_repo + " as bad (via " + data.package_name +
+          "). Feedback id " + data.id + " written to Lakebase; CDC will carry it to Delta.",
+          true
+        );
+        loadFeedback();
+      } catch (err) {
+        showFeedbackStatus("Request failed: " + err, false);
+      }
+    }
+
+    async function loadFeedback() {
+      const body = document.getElementById("feedback-body");
+      const empty = document.getElementById("feedback-empty");
+      try {
+        const resp = await fetch("/graph/edges/feedback");
+        const data = await resp.json();
+        if (!resp.ok) {
+          body.innerHTML = "";
+          empty.textContent = data.error || "Could not load feedback.";
+          empty.style.display = "block";
+          return;
+        }
+        body.innerHTML = "";
+        empty.style.display = data.length === 0 ? "block" : "none";
+        if (data.length === 0) empty.textContent = "No feedback submitted yet.";
+        data.forEach((row) => {
+          const tr = document.createElement("tr");
+          const when = row.created_at ? new Date(row.created_at).toLocaleString() : "-";
+          const badge = row.feedback === "bad"
+            ? '<span style="color:#b00020; font-weight:600;">bad</span>'
+            : '<span style="color:#1b5e20; font-weight:600;">good</span>';
+          tr.innerHTML = `<td><code>${row.source_repo}</code></td><td>${row.package_name}</td>` +
+            `<td><code>${row.suggested_repo}</code></td><td>${badge}</td>` +
+            `<td class="hint">${row.reason || "-"}</td><td class="hint">${when}</td>` +
+            `<td><button class="del-btn" onclick="undoFeedback(${row.id})">Undo</button></td>`;
+          body.appendChild(tr);
+        });
+      } catch (err) {
+        empty.textContent = "Failed to load feedback: " + err;
+        empty.style.display = "block";
+      }
+    }
+
+    async function undoFeedback(id) {
+      if (!confirm("Remove feedback #" + id + "? The suggestion will be unblocked on the next run.")) return;
+      try {
+        const resp = await fetch("/graph/edges/feedback", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: id }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          showFeedbackStatus("Error: " + (data.error || resp.statusText), false);
+          return;
+        }
+        showFeedbackStatus("Removed feedback #" + id + ".", true);
+        loadFeedback();
+      } catch (err) {
+        showFeedbackStatus("Request failed: " + err, false);
+      }
+    }
+
+    checkSchemaStatus();
+    loadRepos();
+    loadEdgeStats();
+    loadEdges();
+    loadFeedback();
+  </script>
+</body>
+</html>
