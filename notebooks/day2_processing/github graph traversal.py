@@ -55,15 +55,43 @@ FETCH_MODE = dbutils.widgets.get("fetch_mode")
 
 # Lakebase tables are bootcamp_students.<name>_<username>. CDF writes
 # lb_<postgres_table>_history into the UC catalog/schema below.
-repos_history_table = f"{catalog}.{schema}.lb_github_repos_{username}_history"
+def _resolve_cdf_table(base_name):
+    """Find the real CDF destination table, accounting for auto-suffixing.
+
+    When a destination name is already taken (usually because a source table was
+    dropped and recreated -- CDF preserves the old Delta table), CDF writes to
+    lb_<table>_history_1, _2, and so on. Hardcoding the unsuffixed name silently
+    reads a stale, empty table: no error, no rows, no edges.
+
+    Picks the candidate with the most rows; falls back to the base name.
+    """
+    best, best_count = base_name, -1
+    for candidate in [base_name] + [f"{base_name}_{i}" for i in range(1, 4)]:
+        try:
+            if not spark.catalog.tableExists(candidate):
+                continue
+            n = spark.table(candidate).count()
+        except Exception:
+            continue
+        print(f"    candidate {candidate}: {n} rows")
+        if n > best_count:
+            best, best_count = candidate, n
+    if best_count <= 0:
+        print(f"  ⚠ No CDF rows found for {base_name} -- check that the source table "
+              f"has rows and REPLICA IDENTITY FULL")
+    return best
+
+
+repos_history_table = _resolve_cdf_table(f"{catalog}.{schema}.lb_github_repos_{username}_history")
 github_staging_table = f"{catalog}.{schema}.github_api_staging_{username}"
 graph_edges_table = f"{catalog}.{schema}.github_graph_edges_{username}"
 ai_query_cache_table = f"{catalog}.{schema}.ai_query_cache_{username}"
 # Reverse flow: the Flask app writes to bootcamp_students.ai_suggestion_feedback_<username>
-# in Lakebase; CDC lands it here using the same lb_<pg_table>_history convention as
-# lb_github_repos_<username>_history above. (The assignment text calls this
-# "..._cdc" -- that name does not match how CDC actually names tables in this workspace.)
-feedback_history_table = f"{catalog}.{schema}.lb_ai_suggestion_feedback_{username}_history"
+# in Lakebase; CDC lands it here using the same lb_<pg_table>_history convention.
+# Resolved the same way -- it is subject to the identical _1 collision.
+feedback_history_table = _resolve_cdf_table(
+    f"{catalog}.{schema}.lb_ai_suggestion_feedback_{username}_history"
+)
 print("Tables:")
 print(f"  repos history : {repos_history_table}")
 print(f"  staging       : {github_staging_table}")

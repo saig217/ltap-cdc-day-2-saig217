@@ -172,7 +172,14 @@ You should see the smoke-test row (`facebook/react` / `loose-envify` /
 | Replica identity not set | `relreplident` = `f`? | Re-run the `ALTER TABLE` as the table owner |
 | Not flushed yet | — | Wait ~15s; CDF batches |
 | Feed not running | `SELECT * FROM wal2delta.tables;` | Ask on Discord — do not start/stop the feed yourself |
-| Name collision | `SHOW TABLES IN bootcamp_students.bootcamp_cdc LIKE '*feedback*'` | CDF auto-suffixes duplicates as `..._history_1` |
+| Name collision | `SHOW TABLES IN bootcamp_students.bootcamp_cdc LIKE 'lb_*saig217*'` | CDF auto-suffixes duplicates as `..._history_1`. The notebook's `_resolve_cdf_table()` picks the populated one automatically — but check the printed `candidate ...: N rows` lines to confirm it chose right. |
+
+⚠️ **The `_1` trap.** If a source table was ever dropped and recreated, CDF preserves
+the orphaned destination Delta table and writes the new feed to `lb_<table>_history_1`.
+The unsuffixed table still exists with zero rows. Reading it produces no error and no
+data — the traversal runs green and writes nothing, because `write_graph_edges()`
+returns silently on an empty edge list. `_resolve_cdf_table()` in the notebook now
+picks whichever candidate actually has rows, for both the repos and feedback tables.
 
 **If the table name differs** from `lb_ai_suggestion_feedback_saig217_history`, edit
 line ~60 of `notebooks/day2_processing/github graph traversal.py` to match. The
