@@ -515,6 +515,7 @@ def fetch_all_for_repos_graphql(iterator):
 
 # COMMAND ----------
 
+# DBTITLE 1,AI dependency discovery
 _AI_DEPENDENCY_PROMPT = """You are analyzing dependency files from GitHub repository "{source_repo}".
 Below are the contents of its dependency/manifest files.
 
@@ -529,8 +530,8 @@ Rules:
 - ONLY suggest repos you are confident exist on GitHub in "owner/repo" format
 - Focus on the most significant/popular dependencies, skip trivial ones
 - Do NOT suggest the source repo itself
-- Respond ONLY with a JSON object mapping package names to repos, e.g.: {"package1": "owner/repo1", "package2": "owner/repo2"}
-- If you cannot determine any repos, respond with: {}"""
+- Respond ONLY with a JSON object mapping package names to repos, e.g.: {{"package1": "owner/repo1", "package2": "owner/repo2"}}
+- If you cannot determine any repos, respond with: {{}}"""
 
 
 def load_blocked_suggestions():
