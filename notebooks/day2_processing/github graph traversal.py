@@ -1,4 +1,9 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
+
 
 # COMMAND ----------
 
@@ -31,9 +36,10 @@ from github_client import GitHubClient
 
 # COMMAND ----------
 
+# DBTITLE 1,Configuration
 dbutils.widgets.text("catalog", "bootcamp_students", "Unity Catalog name")
 dbutils.widgets.text("schema", "bootcamp_cdc", "UC schema (CDF destination)")
-dbutils.widgets.text("username", "", "Lakebase table suffix (your username)")
+dbutils.widgets.text("username", "saig217", "Lakebase table suffix (your username)")
 dbutils.widgets.text("target_repos", "500", "Target repos")
 dbutils.widgets.text("max_hops", "3", "Max hops")
 dbutils.widgets.text("fetch_mode", "graphql", "Fetch mode: graphql or rest")
@@ -781,9 +787,12 @@ def write_graph_edges():
 
 # COMMAND ----------
 
+# DBTITLE 1,fetch_and_stage
 def fetch_and_stage(repo_names, mode="overwrite"):
     """Fetch repo data in parallel via mapInPandas and write to staging table."""
     if not repo_names:
+        # Create empty table so downstream cells can read it
+        spark.createDataFrame([], schema=output_schema).write.format("delta").mode(mode).option("overwriteSchema", "true").saveAsTable(github_staging_table)
         return
     batch_df = spark.createDataFrame(
         [(name,) for name in repo_names], schema=["full_name"]
@@ -816,6 +825,13 @@ print(f"  ✓ Seed repos staged")
 driver_client = GitHubClient(token=_github_token)
 
 # COMMAND ----------
+
+# DBTITLE 1,Traversal loop
+if not spark.catalog.tableExists(github_staging_table):
+    raise RuntimeError(
+        f"Staging table {github_staging_table} not found. "
+        "Re-run the seed cell above (Cell 23) first."
+    )
 
 for hop in range(1, MAX_HOPS + 1):
     if len(all_fetched) >= TARGET_REPOS:
